@@ -147,7 +147,6 @@ function login(){
     .catch(e=>alert(e.message));
 }
 
-// 🔐 ESCONDE LOGIN
 auth.onAuthStateChanged(user => {
   if(user){
     document.getElementById("loginArea").style.display="none";
@@ -162,12 +161,6 @@ let grafico2;
 
 // 📅 MÊS
 function mesAtual(){ return document.getElementById("mes").value; }
-function mesAnterior(m){
-  let [ano, mes] = m.split("-").map(Number);
-  mes--;
-  if(mes==0){ mes=12; ano--; }
-  return ano + "-" + String(mes).padStart(2,"0");
-}
 
 // 📤 EXPORTAR
 async function exportar(){
@@ -196,62 +189,104 @@ function importar(){
   reader.readAsText(file);
 }
 
-// 💾 SALVAR
+// 💾 SALVAR (CORRIGIDO)
 async function salvarSalario(){
   salario = Number(document.getElementById("salario").value);
-  await db.collection("meses").doc(mesAtual()).set({salario,gastos});
+  await db.collection("meses").doc(mesAtual()).set(
+    { salario, gastos },
+    { merge: true }
+  );
   carregar();
 }
 
-// ➕ ADD
+// ➕ ADD (CORRIGIDO)
 async function adicionar(){
   let desc = document.getElementById("desc").value;
   let valor = Number(document.getElementById("valor").value);
   let cat = document.getElementById("categoria").value;
   if(!desc || !valor) return;
+
   gastos.push({desc,valor,cat});
-  await db.collection("meses").doc(mesAtual()).set({salario,gastos});
+
+  await db.collection("meses").doc(mesAtual()).set(
+    { salario, gastos },
+    { merge: true }
+  );
+
   document.getElementById("desc").value = "";
   document.getElementById("valor").value = "";
   carregar();
 }
 
-// ❌ DELETE
+// ❌ DELETE (CORRIGIDO)
 async function excluir(i){
   gastos.splice(i,1);
-  await db.collection("meses").doc(mesAtual()).set({salario,gastos});
+
+  await db.collection("meses").doc(mesAtual()).set(
+    { salario, gastos },
+    { merge: true }
+  );
+
   carregar();
 }
 
 // 📥 LOAD
 async function carregar(){
   let doc = await db.collection("meses").doc(mesAtual()).get();
-  if(doc.exists){ let data = doc.data(); gastos = data.gastos || []; salario = data.salario || 0; }
-  else{ gastos = []; salario = 0; }
+  if(doc.exists){
+    let data = doc.data();
+    gastos = data.gastos || [];
+    salario = data.salario || 0;
+  } else {
+    gastos = [];
+    salario = 0;
+  }
   document.getElementById("salario").value = salario;
   atualizar();
 }
 
-// 🔄 UPDATE
+// 🧠 NOVO CÁLCULO DE SALDO (CORRETO)
+async function calcularSaldoAteMes(mesAtualSelecionado){
+  let snapshot = await db.collection("meses")
+    .orderBy(firebase.firestore.FieldPath.documentId())
+    .get();
+
+  let saldo = 0;
+
+  snapshot.forEach(doc=>{
+    if(doc.id <= mesAtualSelecionado){
+      let data = doc.data();
+      let total = (data.gastos || []).reduce((s,g)=>s+g.valor,0);
+      saldo += (data.salario || 0) - total;
+    }
+  });
+
+  return saldo;
+}
+
+// 🔄 UPDATE (CORRIGIDO)
 async function atualizar(){
   let lista = document.getElementById("lista");
   lista.innerHTML = "";
-  let total=0; let categorias={};
+
+  let total=0;
+  let categorias={};
+
   gastos.forEach((g,i)=>{
     total += g.valor;
     categorias[g.cat] = (categorias[g.cat]||0)+g.valor;
-    lista.innerHTML += `<tr><td>${g.desc}</td><td>${g.cat}</td><td>${g.valor}</td><td><button onclick="excluir(${i})">X</button></td></tr>`;
+
+    lista.innerHTML += `
+      <tr>
+        <td>${g.desc}</td>
+        <td>${g.cat}</td>
+        <td>${g.valor}</td>
+        <td><button onclick="excluir(${i})">X</button></td>
+      </tr>`;
   });
 
-  let saldoAnterior=0;
-  let docAnt=await db.collection("meses").doc(mesAnterior(mesAtual())).get();
-  if(docAnt.exists){
-    let data=docAnt.data();
-    let totalAnt=(data.gastos||[]).reduce((s,g)=>s+g.valor,0);
-    saldoAnterior=(data.salario||0)-totalAnt;
-  }
+  let saldoFinal = await calcularSaldoAteMes(mesAtual());
 
-  let saldoFinal=(salario+saldoAnterior)-total;
   document.getElementById("total").innerText = total.toFixed(2);
   document.getElementById("saldo").innerText = saldoFinal.toFixed(2);
 
@@ -263,12 +298,20 @@ async function atualizar(){
 function desenharPizza(cat){
   let ctx = document.getElementById("grafico");
   if(grafico) grafico.destroy();
-  grafico = new Chart(ctx,{type:"pie",data:{labels:Object.keys(cat),datasets:[{data:Object.values(cat)}]}});
+  grafico = new Chart(ctx,{
+    type:"pie",
+    data:{labels:Object.keys(cat),datasets:[{data:Object.values(cat)}]}
+  });
 }
 
+// 📊 COMPARATIVO (CORRIGIDO)
 async function desenharComparativo(){
-  let snapshot = await db.collection("meses").get();
-  let meses=[]; let categorias={};
+  let snapshot = await db.collection("meses")
+    .orderBy(firebase.firestore.FieldPath.documentId())
+    .get();
+
+  let meses=[];
+  let categorias={};
 
   snapshot.forEach(doc=>{
     meses.push(doc.id);
@@ -278,23 +321,36 @@ async function desenharComparativo(){
     });
   });
 
-  for(let cat in categorias){ categorias[cat] = meses.map(()=>0); }
+  meses.sort();
+
+  for(let cat in categorias){
+    categorias[cat] = meses.map(()=>0);
+  }
 
   snapshot.forEach(doc=>{
     let i=meses.indexOf(doc.id);
     let data=doc.data();
-    (data.gastos||[]).forEach(g=>{ categorias[g.cat][i]+=g.valor; });
+    (data.gastos||[]).forEach(g=>{
+      categorias[g.cat][i]+=g.valor;
+    });
   });
 
-  let datasets=Object.keys(categorias).map(cat=>({ label:cat, data:categorias[cat] }));
+  let datasets = Object.keys(categorias).map(cat=>({
+    label:cat,
+    data:categorias[cat]
+  }));
+
   let ctx = document.getElementById("graficoComparativo");
   if(grafico2) grafico2.destroy();
-  grafico2 = new Chart(ctx,{ type:"line", data:{labels:meses,datasets:datasets} });
+
+  grafico2 = new Chart(ctx,{
+    type:"line",
+    data:{labels:meses,datasets:datasets}
+  });
 }
 
 // INIT
 window.addEventListener('load', ()=>carregar());
 </script>
-
 </body>
 </html>
